@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.Reliability;
+using Microsoft.SemanticKernel.Orchestration;
 
 namespace OpenAITextGenerator.Services
 {
@@ -22,7 +23,7 @@ namespace OpenAITextGenerator.Services
         {
         }
 
-        public async Task<string> GetSematicFunctionResults(string instruction, string webSearchResultsString)
+        public async Task<string> GetSematicFunctionResults(string instruction, string webSearchResultsString, ContextVariables myContext)
         {
            
             IKernel kernel = Kernel.Builder
@@ -41,10 +42,10 @@ namespace OpenAITextGenerator.Services
 
             kernel.Config.AddOpenAITextCompletionService("text-davinci-003", "text-davinci-003", openAPIKey);
             var resultsAndInstructions = webSearchResultsString + instruction;
-            var func = kernel.CreateSemanticFunction(resultsAndInstructions);
+            var QuestionFunction = kernel.CreateSemanticFunction(resultsAndInstructions, maxTokens: 500);
 
-            var result = await func.InvokeAsync();
-            
+            var result = await kernel.RunAsync(myContext, QuestionFunction);
+
             var openAICompletionResponseGeneratedText = result.ToString().Trim();
 
 

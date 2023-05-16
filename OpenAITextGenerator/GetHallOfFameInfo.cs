@@ -7,6 +7,11 @@ using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.Bing.WebSearch;
 using Microsoft.Extensions.Logging;
+using Microsoft.SemanticKernel;
+using Microsoft.SemanticKernel.CoreSkills;
+using Microsoft.SemanticKernel.Orchestration;
+using Microsoft.SemanticKernel.Reliability;
+using Newtonsoft.Json;
 using OpenAITextGenerator.Services;
 using OpenAITextGenerator.Shared;
 
@@ -44,7 +49,7 @@ namespace OpenAITextGenerator
                 return response;
             }
 
-            var mlbBatterInfo = JsonSerializer.Deserialize<MLBBatterInfo>(requestBodyString) ?? new MLBBatterInfo();
+            var mlbBatterInfo = System.Text.Json.JsonSerializer.Deserialize<MLBBatterInfo>(requestBodyString) ?? new MLBBatterInfo();
             _logger.LogInformation("GenerateHallOfFameText - MLBBatterInfo Deserialized");
 
             var narratives = new List<NarrativeResult>();
@@ -97,55 +102,91 @@ namespace OpenAITextGenerator
                 {
                     _logger.LogInformation("GenerateHallOfFameText - MLBBatterInfo - WebSearchResults NOT FOUND in Cache");
 
-                    var bingSearchKey = System.Environment.GetEnvironmentVariable("BING_SEARCH_KEY");
-                    var bingSearchClient = new WebSearchClient(new ApiKeyServiceClientCredentials(bingSearchKey));
-                    var bingWebData = await bingSearchClient.Web.SearchAsync(query: searchString, count: 8);
-
-
-                    if (bingWebData?.WebPages?.Value?.Count > 0)
+                    IKernel kernel = Kernel.Builder
+                    .Configure(c => c.SetDefaultHttpRetryConfig(new HttpRetryConfig
                     {
-                        // Itertate over the Bing Web Pages (Non-Cache Results)
-                        foreach (var bingWebPage in bingWebData.WebPages.Value)
-                        {
-                            bingSearchId++;
+                        MaxRetryCount = 3,
+                        UseExponentialBackoff = true,
+                        //  MinRetryDelay = TimeSpan.FromSeconds(2),
+                        //  MaxRetryDelay = TimeSpan.FromSeconds(8),
+                        //  MaxTotalRetryTime = TimeSpan.FromSeconds(30),
+                        //  RetryableStatusCodes = new[] { HttpStatusCode.TooManyRequests, HttpStatusCode.RequestTimeout },
+                        //  RetryableExceptions = new[] { typeof(HttpRequestException) }
+                    }))
+                    .Build();
 
-                            webSearchResultsString += string.Format("[{0}]: \"{1}: {2}\"\r\nURL: {3}\r\n\r\n",
-                                bingSearchId, bingWebPage.Name, bingWebPage.Snippet, bingWebPage.Url);
-
-                            footNotes += string.Format("[{0}]: {1}: {2}  \r\n",
-                                bingSearchId, bingWebPage.Name, bingWebPage.Url);
-
-                            webSearchResults.Add(new WebSearchResult
-                            {
-                                Id = bingSearchId,
-                                Name = bingWebPage.Name,
-                                Snippet = bingWebPage.Snippet,
-                                Url = bingWebPage.Url
-                            });
-                        }
-
-                        // Add to Cache - WebSearchResults
-                        _redisServices.AddWebSearchResults(mlbBatterInfo, searchString, webSearchResults);
+                    var search_skill = kernel.ImportSkill(new SearchSkill());
+                    var searchContext = new ContextVariables();
+                    searchContext.Set("NoOfResults", "8");
+                    searchContext.Set("InputSearch", searchString);
+                    var result = await kernel.RunAsync(searchContext,
+                            search_skill["SearchResults"]
+                            );
+                    if(result.Result != "") 
+                    {
+                        var listResults = JsonConvert.DeserializeObject<List<WebSearchResult>>(result.Result);
+                        _redisServices.AddWebSearchResults(mlbBatterInfo, searchString, listResults);
                     }
-                    
+                    //var bingSearchKey = System.Environment.GetEnvironmentVariable("BING_SEARCH_KEY");
+                    //var bingSearchClient = new WebSearchClient(new ApiKeyServiceClientCredentials(bingSearchKey));
+                    //var bingWebData = await bingSearchClient.Web.SearchAsync(query: searchString, count: 8);
+
+
+                    //if (bingWebData?.WebPages?.Value?.Count > 0)
+                    //{
+                    //    // Itertate over the Bing Web Pages (Non-Cache Results)
+                    //    foreach (var bingWebPage in bingWebData.WebPages.Value)
+                    //    {
+                    //        bingSearchId++;
+
+                    //        webSearchResultsString += string.Format("[{0}]: \"{1}: {2}\"\r\nURL: {3}\r\n\r\n",
+                    //            bingSearchId, bingWebPage.Name, bingWebPage.Snippet, bingWebPage.Url);
+
+                    //        footNotes += string.Format("[{0}]: {1}: {2}  \r\n",
+                    //            bingSearchId, bingWebPage.Name, bingWebPage.Url);
+
+                    //        webSearchResults.Add(new WebSearchResult
+                    //        {
+                    //            Id = bingSearchId,
+                    //            Name = bingWebPage.Name,
+                    //            Snippet = bingWebPage.Snippet,
+                    //            Url = bingWebPage.Url
+                    //        });
+                    //    }
+
+                    //    // Add to Cache - WebSearchResults
+                    //    _redisServices.AddWebSearchResults(mlbBatterInfo, searchString, webSearchResults);
+                    //}
+
                 }
 
                 // OpenAI - Text Generator Components
-                var promptInstructions = string.Format("The current date is {5}. Using most of the provided Web search results and probability and statistics found in the given query, write a comprehensive reply to the given query. " +
-                    "Make sure to cite results using [number] notation of each URL after the reference. " +
-                    "If the provided search results refer to multiple subjects with the same name, write separate answers for each subject. " +
-                    "Query: An AI model states the probability of baseball hall of fame induction for {0} as {1}. {0} has played baseball for {2} years. Provide a detailed case supporting or against {0} to be considered for the Hall of Fame.\r\n",
-                    mlbBatterInfo?.FullPlayerName, mlbBatterInfo?.HallOfFameProbability.ToString("P", CultureInfo.InvariantCulture), mlbBatterInfo?.YearsPlayed,
-                    mlbBatterInfo?.HR, mlbBatterInfo?.TotalPlayerAwards, DateTime.Now.ToString("M/d/yyyy"));
+                //var promptInstructions = string.Format("The current date is {5}. Using most of the provided Web search results and probability and statistics found in the given query, write a comprehensive reply to the given query. " +
+                //    "Make sure to cite results using [number] notation of each URL after the reference. " +
+                //    "If the provided search results refer to multiple subjects with the same name, write separate answers for each subject. " +
+                //    "Query: An AI model states the probability of baseball hall of fame induction for {0} as {1}. {0} has played baseball for {2} years. Provide a detailed case supporting or against {0} to be considered for the Hall of Fame.\r\n",
+                //    mlbBatterInfo?.FullPlayerName, mlbBatterInfo?.HallOfFameProbability.ToString("P", CultureInfo.InvariantCulture), mlbBatterInfo?.YearsPlayed,
+                //    mlbBatterInfo?.HR, mlbBatterInfo?.TotalPlayerAwards, DateTime.Now.ToString("M/d/yyyy"));
 
-                string openAPIResults = await _openAPIService.GetSematicFunctionResults(promptInstructions, webSearchResultsString);
+                var promptInstructions = """The current date is {{$CurrentDate}}. Using most of the provided Web search results and probability and statistics found in the given query, write a comprehensive reply to the given query. Make sure to cite results using [number] notation of each URL after the reference. If the provided search results refer to multiple subjects with the same name, write separate answers for each subject. Query: An AI model states the probability of baseball hall of fame induction for {{$PlayerName}} as {{$Probability}}. {{$PlayerName}} has played baseball for {{$YearsPlayed}} years. Provide a detailed case supporting or against {{$PlayerName}} to be considered for the Hall of Fame.""";
+                var mycontext = new ContextVariables();
+                mycontext.Set("PlayerName", mlbBatterInfo?.FullPlayerName);
+                mycontext.Set("Probability", mlbBatterInfo?.HallOfFameProbability.ToString("P", CultureInfo.InvariantCulture));
+                mycontext.Set("CurrentDate", DateTime.Now.ToString("M/d/yyyy"));
+                mycontext.Set("YearsPlayed", mlbBatterInfo?.YearsPlayed.ToString());
+                mycontext.Set("HR", mlbBatterInfo?.HR.ToString());
+                mycontext.Set("TotalPlayerAwards", mlbBatterInfo?.TotalPlayerAwards.ToString());
+
+
+
+                string openAPIResults = await _openAPIService.GetSematicFunctionResults(promptInstructions, webSearchResultsString,mycontext);
                 
                 
                 var fullNarrativeResponse = openAPIResults + "\r\n\r\n" + footNotes;
                 _logger.LogInformation("GenerateHallOfFameText - OpenAI Text: " + openAPIResults);
 
                 // Cache - Add Response To Cache
-                //_redisServices.AddNarrative(mlbBatterInfo, fullNarrativeResponse ?? string.Empty);
+                _redisServices.AddNarrative(mlbBatterInfo, fullNarrativeResponse ?? string.Empty);
 
                 // Successful response (OK)
                 response.StatusCode = HttpStatusCode.OK;
